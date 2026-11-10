@@ -48,16 +48,30 @@ final class GestaltManager: ObservableObject {
             #if targetEnvironment(simulator)
             throw GestaltFailure("Device access is unavailable in the Simulator. Open a plist to explore GestaltX.")
             #else
-            guard let signedGroup = GXEntitlementsReader.usableAppGroup() else {
+            let target = (GestaltKeys.devicePath as NSString).deletingLastPathComponent
+            let signedGroups = GXEntitlementsReader.usableAppGroups()
+            guard !signedGroups.isEmpty else {
                 throw GestaltFailure("The signed app has no usable App Group. Enable its App Group capability and sign it again.")
             }
-            let handle = worse_query((GestaltKeys.devicePath as NSString).deletingLastPathComponent,
-                                     signedGroup, false, false)
-            guard handle >= 0 else {
-                if handle == -1 { throw GestaltFailure("The signed app has no usable App Group. Enable its App Group capability and sign it again.") }
-                throw GestaltFailure("MobileGestalt access was denied. Check the OS version and App Group signing.")
+            // Re-signed certificates often carry several App Groups and only some of
+            // them hold a usable container, so try each one instead of trusting one.
+            var rejection: Int64 = -1
+            for signedGroup in signedGroups {
+                var handle = worse_query(target, signedGroup, false, false)
+                if handle == -4, let root = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: signedGroup) {
+                    // The exploit swaps Library/Caches for a symlink, so a container
+                    // without Library fails until the directory exists.
+                    try? FileManager.default.createDirectory(at: root.appendingPathComponent("Library/Caches"),
+                                                             withIntermediateDirectories: true)
+                    handle = worse_query(target, signedGroup, false, false)
+                }
+                if handle >= 0 { return handle }
+                rejection = handle
             }
-            return handle
+            if rejection == -1 {
+                throw GestaltFailure("The signed app has no usable App Group. Enable its App Group capability and sign it again.")
+            }
+            throw GestaltFailure("MobileGestalt access was denied. Check the OS version and App Group signing.")
             #endif
         }, release: { worse_query_release($0) }, eventSink: { text in
             NotificationCenter.default.post(name: Notification.Name("GestaltX.worse_query.log"), object: nil,
